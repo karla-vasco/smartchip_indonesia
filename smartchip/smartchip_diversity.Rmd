@@ -1,0 +1,1051 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+```{r}
+library(readxl)
+library(ggpubr)
+library(rstatix)
+library(dplyr)
+library(forcats)
+library(ggsci)
+library(tibble)
+library("phyloseq")
+```
+
+#Import tables
+```{r}
+setwd("/Users/karlavasco/OneDrive\ -\ Michigan\ State\ University/Zhang_lab/Mila_project/tables/smartchip")
+
+#read in otu table (smartchip normalized abundance)
+otu_table <- read_excel("smartchip_phyloseq_tables.xlsx", sheet = "abundance")
+
+#converting the abundance table to matrix (required to merge with taxonomy table)
+otu_table <- otu_table %>% remove_rownames %>% column_to_rownames(var="GENE_ID") 
+otu_table=as.matrix(otu_table,rownames=TRUE)
+
+#multiplying abundance by 10^9 so we can calculate diversity measures (it won't be possible with decimals)
+otu_table <- otu_table*10^9
+mode(otu_table) <- "integer"
+
+#converting empty values to 0 (in case they exist)
+otu_table[is.na(otu_table)] <- 0
+
+#read in taxonomy (gene ID for smartchip)
+taxonomy <- read_excel("smartchip_phyloseq_tables.xlsx", sheet = "gene_ID")
+
+#setting taxonomy row_names for GENE_ID (that will enable merging with the abundance table)
+taxonomy <- taxonomy %>% remove_rownames %>% column_to_rownames(var="GENE_ID")
+taxonomy=as.matrix(taxonomy)
+
+#read in metadata
+metadata <- read_excel("smartchip_phyloseq_tables.xlsx", sheet = "metadata")
+
+#setting metadata row_names for sample ID (that will enable merging with the other tables)
+metadata <- metadata %>% remove_rownames %>% column_to_rownames(var="Sample_ID")
+
+#Changing the levels of source and group to make them better organized in the plots
+metadata <- metadata %>% mutate(Source = fct_relevel(Source,"Meconium","Infant 7 days", "Mother"))
+metadata <- metadata %>% mutate(Group = fct_relevel(Group,"Control","Sepsis"))
+
+#import all tables as phyloseq objects
+OTU = otu_table(otu_table,taxa_are_rows=TRUE)
+TAX = tax_table(taxonomy)
+META = sample_data(metadata)
+
+# Sanity checks for consistent OTU names
+taxa_names(TAX)
+taxa_names(OTU)
+
+# Same sample names
+sample_names(OTU)
+sample_names(META)
+
+#Making phyloseq object
+physeq=phyloseq(OTU,TAX,META)
+```
+
+#Saving smartchip as a dataframe format (metadata and abundance combined)
+This serves for future analyses
+```{r}
+setwd("/Users/karlavasco/OneDrive\ -\ Michigan\ State\ University/Zhang_lab/Mila_project/tables/smartchip")
+physeq_df <- psmelt(physeq)
+write.csv(physeq_df, "smartchip_data_frame.csv")
+```
+
+#Alpha diversity
+We will calculate the Shannon and Observed genes
+```{r fig.width=10, fig.height=40}
+alpha_diversity <- estimate_richness(physeq, measures = c("Shannon", "Observed"))
+df_alpha <- data.frame(alpha_diversity, sample_data(physeq))
+df <- reshape2::melt(df_alpha, measure.var=c("Shannon","Observed"),id.vars=c("Source","Group"))
+df$value = as.numeric(df$value)
+df <- df %>% mutate(Source = fct_relevel(Source,"Meconium","Infant 7 days", "Mother"))
+df <- df %>% mutate(Group = fct_relevel(Group,"Control","Sepsis"))
+
+#selecting the rows corresponding to each index from the main dataframe
+shannon = dplyr::filter(df, variable == "Shannon")
+observed = dplyr::filter(df, variable == "Observed")
+```
+
+##SHANNON
+###Stats
+Kruskal Wallis between groups
+```{r}
+kw.test <- shannon %>% 
+  kruskal_test(value ~ Group)
+kw.test
+```
+Wilcoxon test stratified by source between groups
+```{r}
+stat.test <- shannon %>% 
+  group_by(Source) %>%
+  wilcox_test(value ~ Group, p.adjust.method = "none", alternative = "less") %>%
+  add_significance("p") %>%
+  add_xy_position(x = "Source", dodge = 0.8)
+stat.test
+```
+
+###Boxplot
+```{r}
+shannon_arg_boxplot = ggboxplot(shannon, x = "Source", y = "value", color = "Group", palette = "jama", fill = "Group", add = c("jitter"), notch = F, outlier.shape = NA) +labs(x = element_blank(), y = "Shannon index") + scale_fill_jama(alpha = 0.5) + theme(legend.position="top") +
+  stat_pvalue_manual(stat.test,  label = "p", tip.length = 0) + 
+  stat_compare_means(comparisons = list(
+    c("Meconium", "Infant 7 days"), 
+    c("Infant 7 days", "Mother"), 
+    c("Meconium", "Mother")
+    ), 
+    label.y = c(4,4.4,4.8), tip.length=.02, hide.ns = F, color = "gray35") +
+    annotate("text", x = 2, y = 5.8, label = "Kruskal-Wallis, p = 0.154", colour = "black")
+shannon_arg_boxplot
+```
+###Boxplot groups
+```{r}
+stat.test <- shannon %>% 
+  group_by(Group) %>%
+  wilcox_test(value ~ Source, p.adjust.method = "none", alternative = "less") %>%
+  add_significance("p") %>%
+  add_xy_position(x = "Source", dodge = 0.8)
+stat.test
+```
+
+```{r}
+shannon_arg_boxplot_groups = ggboxplot(shannon, x = "Source", y = "value", color = "Group", palette = "jama", fill = "Group", add = c("jitter"), notch = F, outlier.shape = NA) +
+  labs(x = element_blank(), y = "Shannon index") + scale_fill_jama(alpha = 0.5) + 
+  theme(legend.position="top") + 
+  facet_wrap(vars(Group)) + 
+  stat_pvalue_manual(stat.test,  label = "p", tip.length = 0) 
+shannon_arg_boxplot_groups
+```
+
+##observed
+###Stats
+Kruskal Wallis between groups
+```{r}
+kw.test <- observed %>% 
+  kruskal_test(value ~ Group)
+kw.test
+```
+
+Wilcoxon stratified by souce and compared between groups
+```{r}
+stat.test <- observed %>% 
+  group_by(Source) %>%
+  wilcox_test(value ~ Group, p.adjust.method = "none", alternative = "less") %>%
+  add_significance("p") %>%
+  add_xy_position(x = "Source", dodge = 0.8)
+stat.test
+```
+
+###Boxplot
+```{r}
+observed_arg_boxplot = ggboxplot(observed, x = "Source", y = "value", color = "Group", palette = "jama", fill = "Group", add = c("jitter"), notch = F, outlier.shape = NA, alpha = 0.5) +labs(x = element_blank(), y = "Observed") + 
+  theme(legend.position="top") + 
+  stat_pvalue_manual(stat.test,  label = "p", tip.length = 0) +
+  stat_compare_means(comparisons = list(
+    c("Meconium", "Infant 7 days"), 
+    c("Infant 7 days", "Mother"), 
+    c("Meconium", "Mother")
+    ), 
+    label.y = c(170,190,210), tip.length=.02, hide.ns = F, color = "gray35") +
+    annotate("text", x = 2, y = 250, label = "Kruskal-Wallis, p = 0.654", colour = "black")
+
+observed_arg_boxplot
+```
+###Boxplot groups
+```{r}
+stat.test <- observed %>% 
+  group_by(Group) %>%
+  wilcox_test(value ~ Source, p.adjust.method = "none", alternative = "less") %>%
+  add_significance("p")
+stat.test
+```
+
+```{r}
+observed_arg_boxplot_groups = ggboxplot(observed, x = "Source", y = "value", color = "Group", palette = "jama", fill = "Group", add = c("jitter"), notch = F, outlier.shape = NA) +labs(x = element_blank(), y = "Nº Observed ARGs") + scale_fill_jama(alpha = 0.5) + theme(legend.position="top") + facet_wrap(vars(Group)) 
+
+# Add p-values onto the box plots
+stat.test <- stat.test %>%
+  add_xy_position(x = "Source", dodge = 0.8)
+
+observed_arg_boxplot_groups = observed_arg_boxplot_groups + stat_pvalue_manual(stat.test,  label = "p", tip.length = 0) 
+observed_arg_boxplot_groups
+```
+
+#Figure Alpha-diversity ARGs
+```{r fig.height=5, fig.width=8}
+alpha_plots <-  ggarrange(shannon_arg_boxplot, observed_arg_boxplot, ncol = 2, labels = c("A", "B"), common.legend = T)
+alpha_plots
+```
+
+```{r}
+setwd("~/OneDrive\ -\ Michigan\ State\ University/Zhang_lab/Mila_project/figures/smartchip")
+ggsave(plot = alpha_plots, "alpha_diversity_smartchip.png",width=10,height=5)
+```
+
+
+##Beta-diversity
+###Bray statistics
+```{r}
+## PERMANOVA
+library(vegan)
+bray_dist = phyloseq::distance(physeq, method="bray") #RUN this only once because it takes a lot of time
+adonis_bray = adonis(bray_dist ~ sample_data(physeq)$Group_Source)
+adonis_bray
+
+adonis_bray = adonis(bray_dist ~ sample_data(physeq)$Source)
+adonis_bray
+
+## Significant PERMANOVA indicates that centroid (or spatial median) among groups is different and/or with-group dispersion among groups is different
+
+## PERMDISP
+bray_disp <-betadisper(bray_dist, sample_data(physeq)$Group_Source, type=c("median"))
+anova(bray_disp)
+
+## If PERMANOVA and PERMDISP are both significant, you can use plotting to tell if PERMANOVA was significant based on centroid (or spatial median)
+plot(bray_disp)
+#?plot.betadisper
+
+## Would look better with higher replication for groups
+plot(bray_disp, label = F)
+
+## Plot with 1 standard deviation ellipses around the group medians
+## sample size issue here, but you get the idea
+plot(bray_disp, label = F, hull = F, ellipse = T)
+
+## Within-group dispersion that PERMDISP is testing
+boxplot(bray_disp, las = 2, cex.lab=1.5)
+?boxplot
+
+## pairwise p-values
+TukeyHSD(bray_disp)
+
+bray_disp_source <-betadisper(bray_dist, sample_data(physeq)$Source, type=c("median"))
+anova(bray_disp_source)
+TukeyHSD(bray_disp_source)
+
+scores(bray_disp, 1:4, display = "centroids")
+
+```
+##Bray beta diversity with phyloseq
+```{r}
+beta_bray <- ordinate(physeq, "PCoA", "bray") #RUN this only ONCE because it takes a lot of time
+```
+
+##Bray beta diversity plot with phyloseq
+Source
+```{r}
+beta_bray_plot_source = plot_ordination(physeq, beta_bray, type="Source", color="Source", shape="Source") +
+  stat_ellipse(type = "t", lineSource = 3) + 
+  theme_classic()+
+  scale_fill_aaas() +
+  scale_color_aaas() + 
+  annotate("text", x = 0.3, y = 0.7, label = expression(paste("PERMANOVA, ",R^2 ,"= 0.07, ", paste(italic('p')),"=0.001"))) +
+  theme(legend.position="top")
+  #To add arrows https://neavemj.github.io/posts/coralMicrobiome +
+
+beta_bray_plot_source
+```
+```{r}
+setwd("~/OneDrive\ -\ Michigan\ State\ University/Zhang_lab/Mila_project/figures/smartchip")
+ggsave(plot = beta_bray_plot_source, "beta_bray_plot_source.png", width = 8, height = 5)
+```
+
+Group and source
+```{r}
+beta_bray_plot_groups = plot_ordination(physeq, beta_bray, type="Group_Source", color="Group_Source", shape="Group_Source") +
+  stat_ellipse(type = "t", lineSource = 3) + 
+  theme_classic()+
+ # labs(colour = "Source") + 
+  scale_fill_aaas() +
+  scale_color_aaas() + 
+  annotate("text", x = 0.3, y = 0.7, label = expression(paste("PERMANOVA, ",R^2 ,"= 0.07, ", paste(italic('p')),"=0.001"))) +
+  theme(legend.position="top")
+  #To add arrows https://neavemj.github.io/posts/coralMicrobiome +
+
+beta_bray_plot_groups
+```
+```{r}
+setwd("~/OneDrive\ -\ Michigan\ State\ University/Zhang_lab/Mila_project/figures/smartchip")
+ggsave(plot = beta_bray_plot_groups, "beta_bray_plot_group&source.png", width = 8, height = 5)
+```
+
+#COMPOSITION
+##Class data frame
+```{r}
+physeq <- subset_taxa(physeq, Type%in%c("ARG"))
+```
+
+```{r}
+glom_class <- tax_glom(physeq, taxrank = 'Class')
+data_class <- psmelt(glom_class) # create dataframe from phyloseq object
+
+library(dplyr)
+data_class_rel = data_class %>% group_by(Sample) %>% mutate(relAbundBySample = Abundance / sum(Abundance)*100) #Converting counts to relative abundance %
+data_class_rel = data_class_rel %>% mutate(Abundance = Abundance / 10^9) #Converting counts to normalized abundance since I multiplied the normalized abundance by 10^9 to calculate the Shannon indes
+```
+
+```{r fig.width=12}
+ARG_class_ab <- ggbarplot(data=data_class_rel, x= "Sample", y = "relAbundBySample", color = "Class", fill = "Class", palette = get_palette("Paired",15), ylab = "Abundance", 
+                          #order = metadata$Sample_ID
+                          ) + 
+  facet_wrap(~Source, scales = "free_x")+labs(colour = "Class", fill = "Class") + 
+  theme(axis.text.x = element_text(angle = 90, size = 5, hjust = 1, colour = "gray35"))
+
+ARG_class_ab
+```
+
+```{r}
+setwd("~/OneDrive\ -\ Michigan\ State\ University/Zhang_lab/Mila_project/figures/smartchip")
+ggsave(plot = ARG_class_ab, "smartchip_class_relab_source.png", width = 20, height = 6)
+```
+
+```{r fig.width=12}
+ARG_class_ab_group_facet <- data_class_rel %>% 
+  mutate(across(Group_Source, factor, levels =c("Control_Meconium", "Sepsis_Meconium", "Control_Infant 7 days", "Sepsis_Infant 7 days", "Control_Mother", "Sepsis_Mother"))) %>%
+  ggbarplot(x= "Sample", y = "relAbundBySample", color = "Class", fill = "Class", palette = get_palette("Paired",15), ylab = "Abundance") + 
+  facet_wrap(~Group_Source, scales = "free_x", nrow = 3, ncol = 2)+
+  labs(colour = "Class", fill = "Class") + 
+  theme(axis.text.x = element_text(angle = 90, size = 5, hjust = 1, colour = "gray35"))
+
+ARG_class_ab_group_facet
+```
+
+```{r}
+setwd("~/OneDrive\ -\ Michigan\ State\ University/Zhang_lab/Mila_project/figures/smartchip")
+ggsave(plot = ARG_class_ab_group_facet, "smartchip_class_relab_group_source.png", width = 20, height = 10)
+```
+
+```{r}
+
+ARG_class_ab_Group <- data_class_rel %>% 
+  group_by(Group_Source, Class) %>% 
+  summarise(Mean_abundance = mean(relAbundBySample)) %>% 
+  ggbarplot(x= "Group_Source", y = "Mean_abundance", color = "Class", fill = "Class", palette = get_palette("Paired",15), 
+            ylab = "Mean Relative Abundance", label.pos="out", position = position_stack(), xlab = "Group", orientation = "horiz", 
+            order = c("Control_Meconium", "Sepsis_Meconium", "Control_Infant 7 days", "Sepsis_Infant 7 days", "Control_Mother", "Sepsis_Mother")) + 
+  theme(legend.position = "right") +
+  labs(colour = "Class", fill = "Class")
+ARG_class_ab_Group
+```
+```{r}
+setwd("~/OneDrive\ -\ Michigan\ State\ University/Zhang_lab/Mila_project/figures/smartchip")
+ggsave(plot = ARG_class_ab_Group, "smartchip_class_mean_relab_group&source.png", width = 7, height = 4)
+```
+
+
+#ANCOM-BC
+```{r}
+library(microbiome)
+library(nloptr)
+library(ANCOMBC)
+```
+
+
+```{r}
+physeq_meconium <-  subset_samples(physeq, Source %in% c("Meconium"))
+physeq_7days <-  subset_samples(physeq, Source %in% c("Infant 7 days"))
+physeq_mother <-  subset_samples(physeq, Source %in% c("Mother"))
+```
+
+##Class
+```{r}
+# Aggregate to phylum level
+physeq = tax_glom(physeq, "Class")
+
+out = ancombc(phyloseq = physeq, formula = "Group",
+              p_adj_method = "holm", zero_cut = 0.90, lib_cut = 0,
+              group = "Group", struc_zero = F, neg_lb = FALSE,
+              tol = 1e-05, max_iter = 100, conserve = TRUE,
+              alpha = 0.05, global = TRUE)
+res = out$res
+
+ancom_results = res %>% 
+  as_tibble()
+
+ancom_signif_list <- ancom_results %>% 
+  filter(p_val <= 0.05)
+ancom_signif_names <- data.frame(sapply(ancom_signif_list,c)) 
+row.names(ancom_signif_names) <- rownames(ancom_signif_list$beta)
+ancom_signif_names <- tibble::rownames_to_column(ancom_signif_names, "Taxa") 
+  merge(day1_Phylum@tax_table,sigtab, by = 0)
+
+write.table(ancom_signif_names, file="~/OneDrive\ -\ Michigan\ State\ University/Zhang_lab/Mila_project/tables/smartchip/ancombc/ANCOM_class_groups.csv",sep = ",", row.names = F) #Writing `sigtab` to my tables
+```
+#Anaerobic Control vs. Ceftiofur
+```{r}
+# Aggregate to phylum level
+physeq = aggregate_taxa(physeq_anero, "Class")
+
+out = ancombc(phyloseq = physeq, formula = "Group",
+              p_adj_method = "holm", zero_cut = 0.90, lib_cut = 0,
+              group = "Group", struc_zero = F, neg_lb = FALSE,
+              tol = 1e-05, max_iter = 100, conserve = TRUE,
+              alpha = 0.05, global = TRUE)
+res = out$res
+
+ancom_results = res %>% 
+  as_tibble()
+
+ancom_signif_list <- ancom_results %>% 
+  filter(p_val <= 0.05)
+ancom_signif_names <- data.frame(sapply(ancom_signif_list,c)) 
+row.names(ancom_signif_names) <- rownames(ancom_signif_list$beta)
+ancom_signif_names <- tibble::rownames_to_column(ancom_signif_names, "Taxa")
+
+write.table(ancom_signif_names, file="~/OneDrive\ -\ Michigan\ State\ University/Zhang_lab/Mila_project/tables/smartchip/ancombc ANCOM_class_anaerobic_con_cef.csv",sep = ",", row.names = F) #Writing `sigtab` to my tables
+```
+
+#Aerobic Control vs. Ceftiofur
+```{r}
+# Aggregate to phylum level
+physeq = aggregate_taxa(physeq_aero, "Class")
+
+out = ancombc(phyloseq = physeq, formula = "Group",
+              p_adj_method = "holm", zero_cut = 0.90, lib_cut = 0,
+              group = "Group", struc_zero = F, neg_lb = FALSE,
+              tol = 1e-05, max_iter = 100, conserve = TRUE,
+              alpha = 0.05, global = TRUE)
+res = out$res
+
+ancom_results = res %>% 
+  as_tibble()
+
+ancom_signif_list <- ancom_results %>% 
+  filter(p_val <= 0.05)
+ancom_signif_names <- data.frame(sapply(ancom_signif_list,c)) 
+row.names(ancom_signif_names) <- rownames(ancom_signif_list$beta)
+ancom_signif_names <- tibble::rownames_to_column(ancom_signif_names, "Taxa")
+
+write.table(ancom_signif_names, file="~/OneDrive\ -\ Michigan\ State\ University/Zhang_lab/Mila_project/tables/smartchip/ancombc ANCOM_class_aerobic_con_cef.csv",sep = ",", row.names = F) #Writing `sigtab` to my tables
+```
+
+##Gene
+#Initial Control vs. Ceftiofur
+```{r}
+# Aggregate to phylum level
+physeq = aggregate_taxa(physeq_ini, "Gene")
+
+out = ancombc(phyloseq = physeq, formula = "Group",
+              p_adj_method = "holm", zero_cut = 0.90, lib_cut = 0,
+              group = "Group", struc_zero = F, neg_lb = FALSE,
+              tol = 1e-05, max_iter = 100, conserve = TRUE,
+              alpha = 0.05, global = TRUE)
+res = out$res
+
+ancom_results = res %>% 
+  as_tibble()
+
+ancom_signif_list <- ancom_results %>% 
+  filter(p_val <= 0.05)
+ancom_signif_names <- data.frame(sapply(ancom_signif_list,c)) 
+row.names(ancom_signif_names) <- rownames(ancom_signif_list$beta)
+ancom_signif_names <- tibble::rownames_to_column(ancom_signif_names, "Taxa")
+
+write.table(ancom_signif_names, file="~/OneDrive\ -\ Michigan\ State\ University/Zhang_lab/Mila_project/tables/smartchip/ancombc ANCOM_gene_ini_con_cef.csv",sep = ",", row.names = F) #Writing `sigtab` to my tables
+```
+#Anaerobic Control vs. Ceftiofur
+```{r}
+# Aggregate to phylum level
+physeq = aggregate_taxa(physeq_anero, "Gene")
+
+out = ancombc(phyloseq = physeq, formula = "Group",
+              p_adj_method = "holm", zero_cut = 0.90, lib_cut = 0,
+              group = "Group", struc_zero = F, neg_lb = FALSE,
+              tol = 1e-05, max_iter = 100, conserve = TRUE,
+              alpha = 0.05, global = TRUE)
+res = out$res
+
+ancom_results = res %>% 
+  as_tibble()
+
+ancom_signif_list <- ancom_results %>% 
+  filter(p_val <= 0.05)
+ancom_signif_names <- data.frame(sapply(ancom_signif_list,c)) 
+row.names(ancom_signif_names) <- rownames(ancom_signif_list$beta)
+ancom_signif_names <- tibble::rownames_to_column(ancom_signif_names, "Taxa")
+
+write.table(ancom_signif_names, file="~/OneDrive\ -\ Michigan\ State\ University/Zhang_lab/Mila_project/tables/smartchip/ancombc ANCOM_gene_anaerobic_con_cef.csv",sep = ",", row.names = F) #Writing `sigtab` to my tables
+```
+
+#Aerobic Control vs. Ceftiofur
+```{r}
+# Aggregate to phylum level
+physeq = aggregate_taxa(physeq_aero, "Gene")
+
+out = ancombc(phyloseq = physeq, formula = "Group",
+              p_adj_method = "holm", zero_cut = 0.90, lib_cut = 0,
+              group = "Group", struc_zero = F, neg_lb = FALSE,
+              tol = 1e-05, max_iter = 100, conserve = TRUE,
+              alpha = 0.05, global = TRUE)
+res = out$res
+
+ancom_results = res %>% 
+  as_tibble()
+
+ancom_signif_list <- ancom_results %>% 
+  filter(p_val <= 0.05)
+ancom_signif_names <- data.frame(sapply(ancom_signif_list,c)) 
+row.names(ancom_signif_names) <- rownames(ancom_signif_list$beta)
+ancom_signif_names <- tibble::rownames_to_column(ancom_signif_names, "Taxa")
+
+write.table(ancom_signif_names, file="~/OneDrive\ -\ Michigan\ State\ University/Zhang_lab/Mila_project/tables/smartchip/ancombc ANCOM_gene_aerobic_con_cef.csv",sep = ",", row.names = F) #Writing `sigtab` to my tables
+```
+
+
+##Class
+#Control Initial vs Aerobic
+```{r}
+# Aggregate to phylum level
+physeq = aggregate_taxa(physeq_con_ini_aero, "Class")
+
+out = ancombc(phyloseq = physeq, formula = "Source",
+              p_adj_method = "holm", zero_cut = 0.90, lib_cut = 0,
+              group = "Source", struc_zero = F, neg_lb = FALSE,
+              tol = 1e-05, max_iter = 100, conserve = TRUE,
+              alpha = 0.05, global = TRUE)
+res = out$res
+
+ancom_results = res %>% 
+  as_tibble()
+
+ancom_signif_list <- ancom_results %>% 
+  filter(p_val <= 0.05)
+ancom_signif_names <- data.frame(sapply(ancom_signif_list,c)) 
+row.names(ancom_signif_names) <- rownames(ancom_signif_list$beta)
+ancom_signif_names <- tibble::rownames_to_column(ancom_signif_names, "Taxa")
+
+write.table(ancom_signif_names, file="~/OneDrive\ -\ Michigan\ State\ University/Zhang_lab/Mila_project/tables/smartchip/ancombc ANCOM_class_ini_aerobic.csv",sep = ",", row.names = F) #Writing `sigtab` to my tables
+```
+
+#Control Initial vs Anerobic
+```{r}
+# Aggregate to phylum level
+physeq = aggregate_taxa(physeq_con_ini_anero, "Class")
+
+out = ancombc(phyloseq = physeq, formula = "Source",
+              p_adj_method = "holm", zero_cut = 0.90, lib_cut = 0,
+              group = "Source", struc_zero = F, neg_lb = FALSE,
+              tol = 1e-05, max_iter = 100, conserve = TRUE,
+              alpha = 0.05, global = TRUE)
+res = out$res
+
+ancom_results = res %>% 
+  as_tibble()
+
+ancom_signif_list <- ancom_results %>% 
+  filter(p_val <= 0.05)
+ancom_signif_names <- data.frame(sapply(ancom_signif_list,c)) 
+row.names(ancom_signif_names) <- rownames(ancom_signif_list$beta)
+ancom_signif_names <- tibble::rownames_to_column(ancom_signif_names, "Taxa")
+
+write.table(ancom_signif_names, file="~/OneDrive\ -\ Michigan\ State\ University/Zhang_lab/Mila_project/tables/smartchip/ancombc ANCOM_class_ini_anaerobic.csv",sep = ",", row.names = F) #Writing `sigtab` to my tables
+```
+
+#Control Aerobic vs Anerobic
+```{r}
+# Aggregate to phylum level
+physeq = aggregate_taxa(physeq_con_aero_anero, "Class")
+
+out = ancombc(phyloseq = physeq, formula = "Source",
+              p_adj_method = "holm", zero_cut = 0.90, lib_cut = 0,
+              group = "Source", struc_zero = F, neg_lb = FALSE,
+              tol = 1e-05, max_iter = 100, conserve = TRUE,
+              alpha = 0.05, global = TRUE)
+res = out$res
+
+ancom_results = res %>% 
+  as_tibble()
+
+ancom_signif_list <- ancom_results %>% 
+  filter(p_val <= 0.05)
+ancom_signif_names <- data.frame(sapply(ancom_signif_list,c)) 
+row.names(ancom_signif_names) <- rownames(ancom_signif_list$beta)
+ancom_signif_names <- tibble::rownames_to_column(ancom_signif_names, "Taxa")
+
+write.table(ancom_signif_names, file="~/OneDrive\ -\ Michigan\ State\ University/Zhang_lab/Mila_project/tables/smartchip/ancombc ANCOM_control_class_aerobic_anaerobic.csv",sep = ",", row.names = F) #Writing `sigtab` to my tables
+```
+
+#Ceftiofur Initial vs Aerobic
+```{r}
+# Aggregate to phylum level
+physeq = aggregate_taxa(physeq_cef_ini_aero, "Class")
+
+out = ancombc(phyloseq = physeq, formula = "Source",
+              p_adj_method = "holm", zero_cut = 0.90, lib_cut = 0,
+              group = "Source", struc_zero = F, neg_lb = FALSE,
+              tol = 1e-05, max_iter = 100, conserve = TRUE,
+              alpha = 0.05, global = TRUE)
+res = out$res
+
+ancom_results = res %>% 
+  as_tibble()
+
+ancom_signif_list <- ancom_results %>% 
+  filter(p_val <= 0.05)
+ancom_signif_names <- data.frame(sapply(ancom_signif_list,c)) 
+row.names(ancom_signif_names) <- rownames(ancom_signif_list$beta)
+ancom_signif_names <- tibble::rownames_to_column(ancom_signif_names, "Taxa")
+
+write.table(ancom_signif_names, file="~/OneDrive\ -\ Michigan\ State\ University/Zhang_lab/Mila_project/tables/smartchip/ancombc ANCOM_cef_class_ini_aerobic.csv",sep = ",", row.names = F) #Writing `sigtab` to my tables
+```
+
+#Ceftiofur Initial vs Anerobic
+```{r}
+# Aggregate to phylum level
+physeq = aggregate_taxa(physeq_cef_ini_anero, "Class")
+
+out = ancombc(phyloseq = physeq, formula = "Source",
+              p_adj_method = "holm", zero_cut = 0.90, lib_cut = 0,
+              group = "Source", struc_zero = F, neg_lb = FALSE,
+              tol = 1e-05, max_iter = 100, conserve = TRUE,
+              alpha = 0.05, global = TRUE)
+res = out$res
+
+ancom_results = res %>% 
+  as_tibble()
+
+ancom_signif_list <- ancom_results %>% 
+  filter(p_val <= 0.05)
+ancom_signif_names <- data.frame(sapply(ancom_signif_list,c)) 
+row.names(ancom_signif_names) <- rownames(ancom_signif_list$beta)
+ancom_signif_names <- tibble::rownames_to_column(ancom_signif_names, "Taxa")
+
+write.table(ancom_signif_names, file="~/OneDrive\ -\ Michigan\ State\ University/Zhang_lab/Mila_project/tables/smartchip/ancombc ANCOM_cef_class_ini_anaerobic.csv",sep = ",", row.names = F) #Writing `sigtab` to my tables
+```
+
+#Ceftiofur Aerobic vs Anerobic
+```{r}
+# Aggregate to phylum level
+physeq = aggregate_taxa(physeq_cef_aero_anero, "Class")
+
+out = ancombc(phyloseq = physeq, formula = "Source",
+              p_adj_method = "holm", zero_cut = 0.90, lib_cut = 0,
+              group = "Source", struc_zero = F, neg_lb = FALSE,
+              tol = 1e-05, max_iter = 100, conserve = TRUE,
+              alpha = 0.05, global = TRUE)
+res = out$res
+
+ancom_results = res %>% 
+  as_tibble()
+
+ancom_signif_list <- ancom_results %>% 
+  filter(p_val <= 0.05)
+ancom_signif_names <- data.frame(sapply(ancom_signif_list,c)) 
+row.names(ancom_signif_names) <- rownames(ancom_signif_list$beta)
+ancom_signif_names <- tibble::rownames_to_column(ancom_signif_names, "Taxa")
+
+write.table(ancom_signif_names, file="~/OneDrive\ -\ Michigan\ State\ University/Zhang_lab/Mila_project/tables/smartchip/ancombc ANCOM_cef_class_aerobic_anaerobic.csv",sep = ",", row.names = F) #Writing `sigtab` to my tables
+```
+
+#Gene
+##Control Initial vs Aerobic
+```{r}
+# Aggregate to phylum level
+physeq = aggregate_taxa(physeq_con_ini_aero, "Gene")
+
+out = ancombc(phyloseq = physeq, formula = "Source",
+              p_adj_method = "holm", zero_cut = 0.90, lib_cut = 0,
+              group = "Source", struc_zero = F, neg_lb = FALSE,
+              tol = 1e-05, max_iter = 100, conserve = TRUE,
+              alpha = 0.05, global = TRUE)
+res = out$res
+
+ancom_results = res %>% 
+  as_tibble()
+
+ancom_signif_list <- ancom_results %>% 
+  filter(p_val <= 0.05)
+ancom_signif_names <- data.frame(sapply(ancom_signif_list,c)) 
+row.names(ancom_signif_names) <- rownames(ancom_signif_list$beta)
+ancom_signif_names <- tibble::rownames_to_column(ancom_signif_names, "Taxa")
+
+write.table(ancom_signif_names, file="~/OneDrive\ -\ Michigan\ State\ University/Zhang_lab/Mila_project/tables/smartchip/ancombc ANCOM_control_gene_ini_aerobic.csv",sep = ",", row.names = F) #Writing `sigtab` to my tables
+```
+
+##Control Initial vs Anerobic
+```{r}
+# Aggregate to phylum level
+physeq = aggregate_taxa(physeq_con_ini_anero, "Gene")
+
+out = ancombc(phyloseq = physeq, formula = "Source",
+              p_adj_method = "holm", zero_cut = 0.90, lib_cut = 0,
+              group = "Source", struc_zero = F, neg_lb = FALSE,
+              tol = 1e-05, max_iter = 100, conserve = TRUE,
+              alpha = 0.05, global = TRUE)
+res = out$res
+
+ancom_results = res %>% 
+  as_tibble()
+
+ancom_signif_list <- ancom_results %>% 
+  filter(p_val <= 0.05)
+ancom_signif_names <- data.frame(sapply(ancom_signif_list,c)) 
+row.names(ancom_signif_names) <- rownames(ancom_signif_list$beta)
+ancom_signif_names <- tibble::rownames_to_column(ancom_signif_names, "Taxa")
+
+write.table(ancom_signif_names, file="~/OneDrive\ -\ Michigan\ State\ University/Zhang_lab/Mila_project/tables/smartchip/ancombc ANCOM_control_gene_ini_anaerobic.csv",sep = ",", row.names = F) #Writing `sigtab` to my tables
+```
+
+#Control Aerobic vs Anerobic
+```{r}
+# Aggregate to phylum level
+physeq = aggregate_taxa(physeq_con_aero_anero, "Gene")
+
+out = ancombc(phyloseq = physeq, formula = "Source",
+              p_adj_method = "holm", zero_cut = 0.90, lib_cut = 0,
+              group = "Source", struc_zero = F, neg_lb = FALSE,
+              tol = 1e-05, max_iter = 100, conserve = TRUE,
+              alpha = 0.05, global = TRUE)
+res = out$res
+
+ancom_results = res %>% 
+  as_tibble()
+
+ancom_signif_list <- ancom_results %>% 
+  filter(p_val <= 0.05)
+ancom_signif_names <- data.frame(sapply(ancom_signif_list,c)) 
+row.names(ancom_signif_names) <- rownames(ancom_signif_list$beta)
+ancom_signif_names <- tibble::rownames_to_column(ancom_signif_names, "Taxa")
+
+write.table(ancom_signif_names, file="~/OneDrive\ -\ Michigan\ State\ University/Zhang_lab/Mila_project/tables/smartchip/ancombc ANCOM_control_gene_aerobic_anaerobic.csv",sep = ",", row.names = F) #Writing `sigtab` to my tables
+```
+
+#Ceftiofur Initial vs Aerobic
+```{r}
+# Aggregate to phylum level
+physeq = aggregate_taxa(physeq_cef_ini_aero, "Gene")
+
+out = ancombc(phyloseq = physeq, formula = "Source",
+              p_adj_method = "holm", zero_cut = 0.90, lib_cut = 0,
+              group = "Source", struc_zero = F, neg_lb = FALSE,
+              tol = 1e-05, max_iter = 100, conserve = TRUE,
+              alpha = 0.05, global = TRUE)
+res = out$res
+
+ancom_results = res %>% 
+  as_tibble()
+
+ancom_signif_list <- ancom_results %>% 
+  filter(p_val <= 0.05)
+ancom_signif_names <- data.frame(sapply(ancom_signif_list,c)) 
+row.names(ancom_signif_names) <- rownames(ancom_signif_list$beta)
+ancom_signif_names <- tibble::rownames_to_column(ancom_signif_names, "Taxa")
+
+write.table(ancom_signif_names, file="~/OneDrive\ -\ Michigan\ State\ University/Zhang_lab/Mila_project/tables/smartchip/ancombc ANCOM_cef_gene_ini_aerobic.csv",sep = ",", row.names = F) #Writing `sigtab` to my tables
+```
+
+#Ceftiofur Initial vs Anerobic
+```{r}
+# Aggregate to phylum level
+physeq = aggregate_taxa(physeq_cef_ini_anero, "Gene")
+
+out = ancombc(phyloseq = physeq, formula = "Source",
+              p_adj_method = "holm", zero_cut = 0.90, lib_cut = 0,
+              group = "Source", struc_zero = F, neg_lb = FALSE,
+              tol = 1e-05, max_iter = 100, conserve = TRUE,
+              alpha = 0.05, global = TRUE)
+res = out$res
+
+ancom_results = res %>% 
+  as_tibble()
+
+ancom_signif_list <- ancom_results %>% 
+  filter(p_val <= 0.05)
+ancom_signif_names <- data.frame(sapply(ancom_signif_list,c)) 
+row.names(ancom_signif_names) <- rownames(ancom_signif_list$beta)
+ancom_signif_names <- tibble::rownames_to_column(ancom_signif_names, "Taxa")
+
+write.table(ancom_signif_names, file="~/OneDrive\ -\ Michigan\ State\ University/Zhang_lab/Mila_project/tables/smartchip/ancombc ANCOM_cef_gene_ini_anaerobic.csv",sep = ",", row.names = F) #Writing `sigtab` to my tables
+```
+
+#Ceftiofur Aerobic vs Anerobic
+```{r}
+# Aggregate to phylum level
+physeq = aggregate_taxa(physeq_cef_aero_anero, "Gene")
+
+out = ancombc(phyloseq = physeq, formula = "Source",
+              p_adj_method = "holm", zero_cut = 0.90, lib_cut = 0,
+              group = "Source", struc_zero = F, neg_lb = FALSE,
+              tol = 1e-05, max_iter = 100, conserve = TRUE,
+              alpha = 0.05, global = TRUE)
+res = out$res
+
+ancom_results = res %>% 
+  as_tibble()
+
+ancom_signif_list <- ancom_results %>% 
+  filter(p_val <= 0.05)
+ancom_signif_names <- data.frame(sapply(ancom_signif_list,c)) 
+row.names(ancom_signif_names) <- rownames(ancom_signif_list$beta)
+ancom_signif_names <- tibble::rownames_to_column(ancom_signif_names, "Taxa")
+
+write.table(ancom_signif_names, file="~/OneDrive\ -\ Michigan\ State\ University/Zhang_lab/Mila_project/tables/smartchip/ancombc ANCOM_cef_gene_aerobic_anaerobic.csv",sep = ",", row.names = F) #Writing `sigtab` to my tables
+```
+
+```{r}
+setwd("~/OneDrive\ -\ Michigan\ State\ University/Zhang_lab/Mila_project/tables/smartchip/ancombc ")
+#Tables to merge to add identifiers in gene
+taxonomy_df <- read_excel("/Users/karlavasco/OneDrive\ -\ Michigan\ State\ University/Zhang_lab/Digesters_project/tables/smartchip/smartchip_phyloseq_tables.xlsx", sheet = "taxonomy")
+ancom_tb <- read.csv("ANCOM_cef_gene_aerobic_anaerobic.csv") 
+
+ancom_tb_id <- merge(taxonomy_df,cef_ae_an,by="OTU_ID",all=F)
+
+#Writing ANCOM table with identifiers
+write.table(ancom_tb_id, file="ANCOM_cef_gene_aerobic_anaerobic.csv",sep = ",", row.names = F) 
+```
+
+```{r}
+setwd("~/OneDrive\ -\ Michigan\ State\ University/Zhang_lab/Mila_project/tables/smartchip/ancombc ")
+
+####Table 2 #####
+ancom_tb <- read.csv("ANCOM_cef_gene_ini_aerobic.csv") 
+ancom_tb_id <- merge(taxonomy_df,cef_ae_an,by="OTU_ID",all=F)
+write.table(ancom_tb_id, file="ANCOM_cef_gene_ini_aerobic.csv",sep = ",", row.names = F) 
+
+####Table 3 #####
+ancom_tb <- read.csv("ANCOM_cef_gene_ini_anaerobic.csv") 
+ancom_tb_id <- merge(taxonomy_df,cef_ae_an,by="OTU_ID",all=F)
+write.table(ancom_tb_id, file="ANCOM_cef_gene_ini_anaerobic.csv",sep = ",", row.names = F) 
+
+####Table 4 #####
+ancom_tb <- read.csv("ANCOM_control_gene_aerobic_anaerobic.csv") 
+ancom_tb_id <- merge(taxonomy_df,cef_ae_an,by="OTU_ID",all=F)
+write.table(ancom_tb_id, file="ANCOM_control_gene_aerobic_anaerobic.csv",sep = ",", row.names = F) 
+
+####Table 5 #####
+ancom_tb <- read.csv("ANCOM_control_gene_ini_aerobic.csv") 
+ancom_tb_id <- merge(taxonomy_df,cef_ae_an,by="OTU_ID",all=F)
+write.table(ancom_tb_id, file="ANCOM_control_gene_ini_aerobic.csv",sep = ",", row.names = F) 
+
+####Table 6 #####
+ancom_tb <- read.csv("ANCOM_control_gene_ini_anaerobic.csv") 
+ancom_tb_id <- merge(taxonomy_df,cef_ae_an,by="OTU_ID",all=F)
+write.table(ancom_tb_id, file="ANCOM_control_gene_ini_anaerobic.csv",sep = ",", row.names = F) 
+
+####Table 7 #####
+ancom_tb <- read.csv("ANCOM_gene_aerobic_con_cef.csv") 
+ancom_tb_id <- merge(taxonomy_df,cef_ae_an,by="OTU_ID",all=F)
+write.table(ancom_tb_id, file="ANCOM_gene_aerobic_con_cef.csv",sep = ",", row.names = F) 
+
+####Table 8 #####
+ancom_tb <- read.csv("ANCOM_gene_anaerobic_con_cef.csv") 
+ancom_tb_id <- merge(taxonomy_df,cef_ae_an,by="OTU_ID",all=F)
+write.table(ancom_tb_id, file="ANCOM_gene_anaerobic_con_cef.csv",sep = ",", row.names = F) 
+
+####Table 9 #####
+ancom_tb <- read.csv("ANCOM_gene_ini_con_cef.csv") 
+ancom_tb_id <- merge(taxonomy_df,cef_ae_an,by="OTU_ID",all=F)
+write.table(ancom_tb_id, file="ANCOM_gene_ini_con_cef.csv",sep = ",", row.names = F) 
+
+```
+
+#Alluvial plot
+```{r fig.height=20, fig.width=10}
+physeq_df <- psmelt(physeq_no_16s) # create dataframe from phyloseq object
+physeq_df_rel_ab = physeq_df %>% group_by(Sample) %>% mutate(relAbundBySample = Abundance / sum(Abundance)*100) #Converting counts to relative abundance %
+
+
+
+physeq_for_alluvia <- physeq_df_rel_ab %>% 
+  select(Source,Class,Gene,relAbundBySample) %>% 
+    filter(Source %notin% c("Taxanomic"))
+
+
+library(ggalluvial)
+alluvia_class <- ggplot(as.data.frame(physeq_for_alluvia),
+       aes(y = relAbundBySample/18, axis1 = Source, axis2 = Class)) +
+  geom_alluvium(aes(fill = Class), width = 1/12) +
+  geom_stratum(width = 1/12, color = "grey") +
+  geom_label(stat = "stratum", aes(label = after_stat(stratum))) +
+#  scale_x_discrete(limits = c("Source", "Class","Gene"), expand = c(.05, .05,.05)) +
+  scale_fill_simpsons() +
+  ggtitle("Relative abundance of ARGs")
+alluvia_class
+```
+
+```{r}
+physeq_for_alluvia_ARGs <- physeq_df_rel_ab %>% 
+  select(Source,Class,Gene,relAbundBySample) %>% 
+  filter(Source %in% c("ARGs"))
+
+physeq_for_alluvia_ARGs_no_tet <- physeq_for_alluvia_ARGs %>% 
+  select(Source,Class,Gene,relAbundBySample) %>% 
+  filter(Class %notin% c("Tetracycline"))
+
+alluvia_class_ARGs <- ggplot(as.data.frame(physeq_for_alluvia_ARGs),
+       aes(y = relAbundBySample/18, axis1 = Source, axis2 = Class, axis3 = Gene)) +
+  geom_alluvium(aes(fill = Class), width = 1/12) +
+  geom_stratum(width = 1/12, color = "grey") +
+  geom_label(stat = "stratum", aes(label = after_stat(stratum))) +
+#  scale_x_discrete(limits = c("Source", "Class","Gene"), expand = c(.05, .05,.05)) +
+  scale_fill_brewer(Source = "qual", palette = "Set1") +
+  ggtitle("Relative abundance of ARGs")
+alluvia_class_ARGs
+
+alluvia_class_ARGs_notet <- ggplot(as.data.frame(physeq_for_alluvia_ARGs_no_tet),
+       aes(y = relAbundBySample/18, axis1 = Source, axis2 = Class, axis3 = Gene)) +
+  geom_alluvium(aes(fill = Class), width = 1/12) +
+  geom_stratum(width = 1/12, color = "grey") +
+  geom_label(stat = "stratum", aes(label = after_stat(stratum))) +
+#  scale_x_discrete(limits = c("Source", "Class","Gene"), expand = c(.05, .05,.05)) +
+  scale_fill_brewer(Source = "qual", palette = "Set1") +
+  ggtitle("Relative abundance of ARGs")
+alluvia_class_ARGs_notet
+```
+#Heat-tree
+#Modifying phyloseq object
+```{r}
+#To plot the tolal counts as percentage in the heat tree, divide the sum of the counts by the number of samples and multiply by 100. Here, I have 158 samples.
+
+physeq_t  = transform_sample_counts(physeq_ARGs, function(x) x / sum(x)/18*100 ) 
+
+#Filter all the taxa that have a percentage higher than 0.0001. This is optional, but I prefer to plot the most abundant genes/taxa
+
+physeq_t1 = phyloseq::filter_taxa(physeq_t, function(x) mean(x) > 1e-5, TRUE) 
+```
+
+#Metacoder
+```{r}
+library(metacoder)
+
+#transforming physeq object into a metacoder object
+
+metacoder_object = parse_phyloseq(physeq_t1) 
+
+#creating a column with total counts. Keep as is
+metacoder_object$data$taxon_counts <- calc_taxon_abund(metacoder_object, data = "otu_table") 
+
+metacoder_object$data$taxon_counts$total <- rowSums(metacoder_object$data$taxon_counts[, -1]) # -1 = taxon_id column
+
+metacoder_object$data$taxon_prop <- calc_obs_props(metacoder_object, "otu_table")
+```
+#Heat tree
+```{r}
+#Plotting heat-tree
+
+heat_tree = metacoder_object %>%
+  # subset to the class rank
+  heat_tree(node_label = taxon_names,
+            node_size = metacoder_object$data$taxon_counts$total,
+             node_size_range = c(0.01, 0.06),
+            edge_size_range = c(0.005, 0.005),
+            node_label_size_range = c(0.01, 0.05),
+         node_color = metacoder_object$data$taxon_counts$total,
+
+            node_color_axis_label = "Proportion",
+            node_size_axis_label = "ARG count",
+            overlap_avoidance =1) #Modify if necssary
+heat_tree
+```
+
+#PDF
+```{r}
+#Saving plot as PDF
+
+#Change with your desired location
+setwd("/Users/karlavasco/OneDrive\ -\ Michigan\ State\ University/Zhang_lab/Digesters_project/figures_plots/smartchip_ct32") 
+
+# mm to inch
+setWidth = 11
+
+# font size in pt
+setFontSize = 7
+
+# 1 in R = 0.75pt, so 0.25pt is specified as 
+setLwd <- 0.25/0.75    
+
+
+pdf(file='ARGs_heatree.pdf',width=setWidth,height=9,pointsize=setFontSize)
+heat_tree
+dev.off()
+```
+#Modifying phyloseq object
+```{r}
+#To plot the tolal counts as percentage in the heat tree, divide the sum of the counts by the number of samples and multiply by 100. Here, I have 158 samples.
+
+physeq_t  = transform_sample_counts(physeq_MGEs, function(x) x / sum(x)/18*100 ) 
+
+#Filter all the taxa that have a percentage higher than 0.0001. This is optional, but I prefer to plot the most abundant genes/taxa
+
+physeq_t1 = phyloseq::filter_taxa(physeq_t, function(x) mean(x) > 1e-5, TRUE) 
+```
+
+#Metacoder
+```{r}
+library(metacoder)
+
+#transforming physeq object into a metacoder object
+
+metacoder_object = parse_phyloseq(physeq_t1) 
+
+#creating a column with total counts. Keep as is
+metacoder_object$data$taxon_counts <- calc_taxon_abund(metacoder_object, data = "otu_table") 
+
+metacoder_object$data$taxon_counts$total <- rowSums(metacoder_object$data$taxon_counts[, -1]) # -1 = taxon_id column
+
+metacoder_object$data$taxon_prop <- calc_obs_props(metacoder_object, "otu_table")
+```
+#Heat tree
+```{r}
+#Plotting heat-tree
+
+heat_tree = metacoder_object %>%
+  # subset to the class rank
+  heat_tree(node_label = taxon_names,
+            node_size = metacoder_object$data$taxon_counts$total,
+             node_size_range = c(0.01, 0.06),
+            edge_size_range = c(0.005, 0.005),
+            node_label_size_range = c(0.01, 0.05),
+         node_color = metacoder_object$data$taxon_counts$total,
+
+            node_color_axis_label = "Proportion",
+            node_size_axis_label = "MGE count",
+            overlap_avoidance =1) #Modify if necssary
+heat_tree
+```
+
+#PDF
+```{r}
+#Saving plot as PDF
+
+#Change with your desired location
+setwd("/Users/karlavasco/OneDrive\ -\ Michigan\ State\ University/Zhang_lab/Digesters_project/figures_plots/smartchip_ct32") 
+
+# mm to inch
+setWidth = 11
+
+# font size in pt
+setFontSize = 7
+
+# 1 in R = 0.75pt, so 0.25pt is specified as 
+setLwd <- 0.25/0.75    
+
+
+pdf(file='MGEs_heatree.pdf',width=setWidth,height=9,pointsize=setFontSize)
+heat_tree
+dev.off()
+```
+
+
